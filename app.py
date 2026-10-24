@@ -1,13 +1,14 @@
-
 import json
+import uuid
+from datetime import date, datetime, time
 from pathlib import Path
-from datetime import date
 
 import streamlit as st
 
 st.set_page_config(page_title="DayTrace", page_icon="📘", layout="wide")
 
 DATA_FILE = Path("daytrace_data.json")
+WHOLE_DAY = "Whole day"
 
 TIME_SLOTS = [
     "8:20–8:50 AM", "8:50–9:20 AM", "9:20–9:50 AM",
@@ -25,28 +26,75 @@ ACTIVITIES = [
     "Break", "Other School Duty"
 ]
 
+
+# ---------- storage (one shared file for every teacher) ----------
+
+def normalise(saved):
+    """Make sure every record has an id, a teacher and a reviewed flag."""
+    records, changed = [], False
+    for r in saved.get("daily_records", []):
+        if not isinstance(r, dict):
+            continue
+        for key, default in (
+            ("id", None), ("teacher", "Unknown teacher"), ("reviewed", False)
+        ):
+            if key not in r:
+                r[key] = uuid.uuid4().hex if key == "id" else default
+                changed = True
+        records.append(r)
+    data = {
+        "daily_records": records,
+        "reviewed_slots": saved.get("reviewed_slots", {}),
+    }
+    return data, changed
+
+
+def save_data(data):
+    DATA_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def load_data():
+    saved = {}
     if DATA_FILE.exists():
         try:
             saved = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-            return {
-                "daily_records": saved.get("daily_records", []),
-                "reviewed_slots": saved.get("reviewed_slots", {})
-            }
         except (OSError, json.JSONDecodeError):
-            pass
-    return {"daily_records": [], "reviewed_slots": {}}
+            saved = {}
+    data, changed = normalise(saved)
+    if changed:
+        save_data(data)  # keep generated ids stable
+    return data
 
-if "daytrace" not in st.session_state:
-    st.session_state.daytrace = load_data()
 
-data = st.session_state.daytrace
+# Loaded fresh on every run so all teachers and the section head
+# always see the same, latest data.
+data = load_data()
 
-def save_data():
-    DATA_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8"
-    )
+
+# ---------- helpers ----------
+
+def fmt_time(t):
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+def clean_name(name):
+    return " ".join(name.split())
+
+
+def same_person(a, b):
+    return clean_name(a).casefold() == clean_name(b).casefold()
+
+
+def section_head_passcode():
+    try:
+        return st.secrets["SECTION_HEAD_PASSCODE"]
+    except Exception:
+        return None
+
+
+# ---------- header ----------
 
 st.markdown("""
 <style>
@@ -64,125 +112,230 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ---------- sidebar: role, name, date ----------
+
+role = st.sidebar.radio("I am a", ["Teacher", "Section Head"])
+is_head = False
+teacher_name = ""
+
+if role == "Teacher":
+    teacher_name = clean_name(st.sidebar.text_input("👤 Your name"))
+else:
+    expected = section_head_passcode()
+    if expected is None:
+        expected = "sectionhead"
+        st.sidebar.warning(
+            "No SECTION_HEAD_PASSCODE secret set. Using the default "
+            "passcode 'sectionhead'. Please set your own."
+        )
+    entered = st.sidebar.text_input("🔑 Section head passcode", type="password")
+    if entered == expected:
+        is_head = True
+    elif entered:
+        st.sidebar.error("Wrong passcode.")
+
 work_date = st.sidebar.date_input("📅 Select workday", date.today())
 selected_date = work_date.isoformat()
 
-records = [
-    r for r in data["daily_records"]
-    if isinstance(r, dict) and r.get("date") == selected_date
+day_records = [
+    r for r in data["daily_records"] if r.get("date") == selected_date
 ]
-reviews = data["reviewed_slots"].setdefault(selected_date, {})
 
-reviewed_count = sum(
-    1 for slot in TIME_SLOTS
-    if reviews.get(slot, "Not Reviewed") != "Not Reviewed"
-)
+# ---------- Teacher view ----------
 
-a, b, c, d = st.columns(4)
-a.metric("Activities recorded", len(records))
-b.metric("Time slots", len(TIME_SLOTS))
-c.metric("Slots reviewed", f"{reviewed_count}/{len(TIME_SLOTS)}")
-d.metric("Review progress", f"{reviewed_count * 100 // len(TIME_SLOTS)}%")
+if role == "Teacher":
+    if not teacher_name:
+        st.info("Enter your name in the sidebar to start recording.")
+        st.stop()
 
-st.progress(reviewed_count / len(TIME_SLOTS))
+    mine = [r for r in day_records if same_person(r.get("teacher", ""), teacher_name)]
+    mine_reviewed = sum(1 for r in mine if r.get("reviewed"))
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "✍️ Record Activity", "✅ Review Workday",
-    "🗓️ Daily Timeline", "💾 Backup"
-])
+    a, b, c = st.columns(3)
+    a.metric("My activities", len(mine))
+    b.metric("Reviewed by section head", mine_reviewed)
+    c.metric("Waiting for review", len(mine) - mine_reviewed)
 
-with tab1:
-    st.subheader("Record a school activity")
-    with st.form("activity_form", clear_on_submit=True):
-        time_slot = st.selectbox("Time slot", TIME_SLOTS)
-        activity = st.selectbox("Activity", ACTIVITIES)
-        description = st.text_input("Description (optional)")
-        submitted = st.form_submit_button("Save Activity", type="primary")
+    tab1, tab2 = st.tabs(["✍️ Record Activity", "🗓️ My Timeline"])
 
-    if submitted:
-        if activity == "Other School Duty":
-            if not description.strip():
-                st.warning("Please describe the other school duty.")
-                st.stop()
-            activity = f"Other School Duty: {description.strip()}"
-        elif description.strip():
-            activity = f"{activity}: {description.strip()}"
+    with tab1:
+        st.subheader("Record a school activity")
 
-        data["daily_records"].append({
-            "date": selected_date,
-            "time": time_slot,
-            "activity": activity
-        })
-        save_data()
-        st.success("Activity saved!")
-        st.rerun()
+        mode = st.radio(
+            "How do you want to enter the time?",
+            ["Choose a slot", "Enter my own time", WHOLE_DAY],
+            horizontal=True,
+        )
 
-with tab2:
-    st.subheader("Review your workday")
-    with st.form("review_form"):
-        choices = {}
-        for i, slot in enumerate(TIME_SLOTS):
-            current = reviews.get(slot, "Not Reviewed")
-            options = ["Not Reviewed", "Reviewed", "Not Applicable"]
-            choices[slot] = st.selectbox(
-                slot, options,
-                index=options.index(current) if current in options else 0,
-                key=f"review_{selected_date}_{i}"
-            )
-        save_reviews = st.form_submit_button("Save Review Progress")
+        with st.form("activity_form", clear_on_submit=True):
+            slot = start = end = None
+            if mode == "Choose a slot":
+                slot = st.selectbox("Time slot", TIME_SLOTS)
+            elif mode == "Enter my own time":
+                col1, col2 = st.columns(2)
+                start = col1.time_input("From", value=time(8, 20), step=300)
+                end = col2.time_input("To", value=time(8, 50), step=300)
+            else:
+                st.info("This will be saved for the whole day.")
 
-    if save_reviews:
-        data["reviewed_slots"][selected_date] = choices
-        save_data()
-        st.success("Review progress saved!")
-        st.rerun()
+            activity = st.selectbox("Activity", ACTIVITIES)
+            description = st.text_input("Description (optional)")
+            submitted = st.form_submit_button("Save Activity", type="primary")
 
-with tab3:
-    st.subheader(f"Daily Timeline — {selected_date}")
-    if not records:
-        st.info("No activities recorded for this date yet.")
-    else:
-        for record in records:
-            with st.container(border=True):
-                st.markdown(f"**🕒 {record.get('time', '')}**")
-                st.write(record.get("activity", ""))
+        if submitted:
+            error = None
+            if mode == "Enter my own time":
+                if end <= start:
+                    error = "The end time must be after the start time."
+                time_label = f"{fmt_time(start)}–{fmt_time(end)}"
+            elif mode == WHOLE_DAY:
+                time_label = WHOLE_DAY
+            else:
+                time_label = slot
 
-        if st.button("Clear activities for this date"):
-            data["daily_records"] = [
-                r for r in data["daily_records"]
-                if not (
-                    isinstance(r, dict)
-                    and r.get("date") == selected_date
-                )
-            ]
-            save_data()
-            st.rerun()
+            if activity == "Other School Duty":
+                if not description.strip():
+                    error = "Please describe the other school duty."
+                else:
+                    activity = f"Other School Duty: {description.strip()}"
+            elif description.strip():
+                activity = f"{activity}: {description.strip()}"
 
-with tab4:
-    st.subheader("Backup your data")
-    backup = json.dumps(data, indent=2, ensure_ascii=False)
-    st.download_button(
-        "⬇️ Download backup",
-        data=backup,
-        file_name="daytrace_backup.json",
-        mime="application/json"
-    )
+            if error:
+                st.warning(error)
+            else:
+                data["daily_records"].append({
+                    "id": uuid.uuid4().hex,
+                    "date": selected_date,
+                    "teacher": teacher_name,
+                    "time": time_label,
+                    "activity": activity,
+                    "reviewed": False,
+                })
+                save_data(data)
+                st.success("Activity saved!")
+                st.rerun()
 
-    uploaded = st.file_uploader("Restore from a JSON backup", type=["json"])
-    if uploaded is not None and st.button("Restore backup"):
-        try:
-            restored = json.load(uploaded)
-            if not isinstance(restored.get("daily_records", []), list):
-                raise ValueError("Invalid activity list")
-            if not isinstance(restored.get("reviewed_slots", {}), dict):
-                raise ValueError("Invalid review data")
-            data["daily_records"] = restored.get("daily_records", [])
-            data["reviewed_slots"] = restored.get("reviewed_slots", {})
-            save_data()
-            st.success("Backup restored!")
-            st.rerun()
-        except (ValueError, TypeError, json.JSONDecodeError):
-            st.error("Please choose a valid DayTrace backup.")
+    with tab2:
+        st.subheader(f"My Timeline — {selected_date}")
+        if not mine:
+            st.info("No activities recorded for this date yet.")
+        else:
+            for record in mine:
+                with st.container(border=True):
+                    status = "✅ Reviewed" if record.get("reviewed") else "⏳ Not reviewed"
+                    st.markdown(f"**🕒 {record.get('time', '')}**  ·  {status}")
+                    st.write(record.get("activity", ""))
+
+            if st.button("Clear my unreviewed activities for this date"):
+                data["daily_records"] = [
+                    r for r in data["daily_records"]
+                    if not (
+                        r.get("date") == selected_date
+                        and same_person(r.get("teacher", ""), teacher_name)
+                        and not r.get("reviewed")
+                    )
+                ]
+                save_data(data)
+                st.rerun()
+
+# ---------- Section head view ----------
+
+else:
+    if not is_head:
+        st.info("Enter the section head passcode in the sidebar.")
+        st.stop()
+
+    total = len(day_records)
+    done = sum(1 for r in day_records if r.get("reviewed"))
+    teachers = sorted({r.get("teacher", "Unknown teacher") for r in day_records})
+
+    a, b, c, d = st.columns(4)
+    a.metric("Teachers", len(teachers))
+    b.metric("Activities recorded", total)
+    c.metric("Reviewed", f"{done}/{total}")
+    d.metric("Review progress", f"{done * 100 // total if total else 0}%")
+    st.progress(done / total if total else 0.0)
+
+    tab1, tab2 = st.tabs(["✅ Review Workday", "💾 Backup"])
+
+    with tab1:
+        st.subheader(f"Review — {selected_date}")
+        if not day_records:
+            st.info("No teacher has recorded activities for this date yet.")
+
+        for teacher in teachers:
+            items = [r for r in day_records if r.get("teacher", "Unknown teacher") == teacher]
+            n_done = sum(1 for r in items if r.get("reviewed"))
+            with st.expander(
+                f"👤 {teacher} — {n_done}/{len(items)} reviewed",
+                expanded=n_done < len(items),
+            ):
+                for r in items:
+                    left, right = st.columns([5, 2])
+                    with left:
+                        st.markdown(f"**🕒 {r.get('time', '')}**")
+                        st.write(r.get("activity", ""))
+                    with right:
+                        if r.get("reviewed"):
+                            st.caption("✅ Reviewed")
+                            if st.button("Undo", key=f"undo_{r['id']}"):
+                                r["reviewed"] = False
+                                r.pop("reviewed_at", None)
+                                save_data(data)
+                                st.rerun()
+                        else:
+                            if st.button(
+                                "Mark as reviewed",
+                                key=f"rev_{r['id']}",
+                                type="primary",
+                            ):
+                                r["reviewed"] = True
+                                r["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
+                                save_data(data)
+                                st.rerun()
+                    st.divider()
+
+                if n_done < len(items):
+                    if st.button(
+                        f"Mark all of {teacher}'s activities as reviewed",
+                        key=f"all_{selected_date}_{teacher}",
+                    ):
+                        now = datetime.now().isoformat(timespec="seconds")
+                        for r in items:
+                            if not r.get("reviewed"):
+                                r["reviewed"] = True
+                                r["reviewed_at"] = now
+                        save_data(data)
+                        st.rerun()
+
+    with tab2:
+        st.subheader("Backup all teachers' data")
+        backup = json.dumps(data, indent=2, ensure_ascii=False)
+        st.download_button(
+            "⬇️ Download backup",
+            data=backup,
+            file_name="daytrace_backup.json",
+            mime="application/json",
+        )
+
+        uploaded = st.file_uploader("Restore from a JSON backup", type=["json"])
+        if uploaded is not None and st.button("Restore backup"):
+            try:
+                restored = json.load(uploaded)
+                if not isinstance(restored.get("daily_records", []), list):
+                    raise ValueError("Invalid activity list")
+                if not isinstance(restored.get("reviewed_slots", {}), dict):
+                    raise ValueError("Invalid review data")
+                new_data, _ = normalise(restored)
+                save_data(new_data)
+                st.success("Backup restored!")
+                st.rerun()
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+                st.error("Please choose a valid DayTrace backup.")
 
 st.divider()
 st.caption("DayTrace | Teacher Workday Tracker")
+
+
+                    
