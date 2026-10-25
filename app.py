@@ -351,10 +351,15 @@ else:
             except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                 st.error("Please choose a valid DayTrace backup.")
 
+        st.divider()
+        st.subheader("🗑️ Delete all data")
+        st.caption("Removes every teacher's entries. Download a backup first if you want to keep a copy.")
+        confirm = st.checkbox("Yes, I want to delete everything")
+        if st.button("Delete all data", disabled=not confirm):
+            save_data({"daily_records": [], "reviewed_slots": {}})
+            st.success("All data deleted.")
+            st.rerun()
+
 st.divider()
 st.caption("DayTrace | Teacher Workday Tracker")
 
-
-
-
-                    
