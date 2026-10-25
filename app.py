@@ -23,7 +23,16 @@ ACTIVITIES = [
     "Teaching", "Lesson Planning", "Correction / Assessment",
     "Classroom Preparation", "Meetings", "Student Support",
     "Administrative Work", "Parent Communication",
+    "English training for teachers", "Training", "Staff record",
+    "Workbook correction", "Preparing progress report",
+    "Progress report writing",
     "Break", "Other School Duty"
+]
+
+TEACHING_SUBJECTS = [
+    "Language", "Math", "GA", "Flip/Tamil", "School Cinema",
+    "Water play", "Art", "Activity", "Outdoor play",
+    "Material play/computer science", "Story/computer science"
 ]
 
 
@@ -167,6 +176,12 @@ if role == "Teacher":
             horizontal=True,
         )
 
+        # Kept outside the form so the sub-options appear right away
+        activity = st.selectbox("Activity", ACTIVITIES)
+        subject = None
+        if activity == "Teaching":
+            subject = st.selectbox("Teaching subject", TEACHING_SUBJECTS)
+
         with st.form("activity_form", clear_on_submit=True):
             slot = start = end = None
             if mode == "Choose a slot":
@@ -178,7 +193,6 @@ if role == "Teacher":
             else:
                 st.info("This will be saved for the whole day.")
 
-            activity = st.selectbox("Activity", ACTIVITIES)
             description = st.text_input("Description (optional)")
             submitted = st.form_submit_button("Save Activity", type="primary")
 
@@ -192,6 +206,9 @@ if role == "Teacher":
                 time_label = WHOLE_DAY
             else:
                 time_label = slot
+
+            if subject:
+                activity = f"Teaching – {subject}"
 
             if activity == "Other School Duty":
                 if not description.strip():
@@ -336,6 +353,8 @@ else:
 
 st.divider()
 st.caption("DayTrace | Teacher Workday Tracker")
+
+
 
 
                     
