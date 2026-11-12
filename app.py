@@ -4,13 +4,23 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 import streamlit as st
+from supabase import create_client
 
 from streamlit_mic_recorder import mic_recorder
 import speech_recognition as sr
 import tempfile
 
 st.set_page_config(page_title="DayTrace", page_icon="📘", layout="wide")
-
+# Connect to Supabase
+try:
+    supabase = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
+    supabase.table("daily_records").select("id").limit(1).execute()
+except Exception as e:
+    st.error(f"Supabase connection failed: {e}")
+    st.stop()
 DATA_FILE = Path("daytrace_data.json")
 WHOLE_DAY = "Whole day"
 
