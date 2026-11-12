@@ -196,8 +196,18 @@ if role == "Teacher":
                 end = col2.time_input("To", value=time(8, 50), step=300)
             else:
                 st.info("This will be saved for the whole day.")
+description = st.text_input("Description (optional)")
 
-            description = st.text_input("Description (optional)")
+st.write("🎤 Voice input")
+
+audio = mic_recorder(
+    start_prompt="Start Recording",
+    stop_prompt="Stop Recording",
+    key="voice_note"
+)
+
+if audio:
+    st.success("Voice recorded successfully!")
             submitted = st.form_submit_button("Save Activity", type="primary")
 
         if submitted:
