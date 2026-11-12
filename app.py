@@ -5,6 +5,10 @@ from pathlib import Path
 
 import streamlit as st
 
+from streamlit_mic_recorder import mic_recorder
+import speech_recognition as sr
+import tempfile
+
 st.set_page_config(page_title="DayTrace", page_icon="📘", layout="wide")
 
 DATA_FILE = Path("daytrace_data.json")
