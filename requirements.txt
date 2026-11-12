@@ -4,3 +4,6 @@ SpeechRecognition
 pydub
 supabase==2.34.1
 reportlab==5.1.0
+fpdf2==2.8.4
+uharfbuzz
+fonttools
