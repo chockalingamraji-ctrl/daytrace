@@ -1,13 +1,20 @@
+
 import hashlib
 import io
 import json
 import uuid
+import calendar
+import os
+import tempfile
+import urllib.request
+
 from datetime import date, datetime, time
 
 import streamlit as st
 import speech_recognition as sr
 from streamlit_mic_recorder import mic_recorder
 from supabase import create_client
+from fpdf import FPDF
 
 
 # ---------- Page setup and Supabase connection ----------
@@ -24,7 +31,6 @@ try:
         st.secrets["SUPABASE_KEY"],
     )
 
-    # Check that the connection and table are available.
     supabase.table("daily_records").select("id").limit(1).execute()
 
 except Exception as e:
@@ -59,7 +65,7 @@ TEACHING_SUBJECTS = [
 ]
 
 
-# ---------- Supabase storage functions ----------
+# ---------- Supabase database functions ----------
 
 def load_data():
     """Load all activity records, including records beyond the first 1,000."""
@@ -152,7 +158,6 @@ def restore_backup(restored_data):
 
     rows_to_restore = []
 
-    # Validate every record before deleting existing data.
     for record in records:
         if not isinstance(record, dict):
             raise ValueError("An activity record is invalid.")
@@ -164,12 +169,9 @@ def restore_backup(restored_data):
         if not teacher or not activity or not record_date:
             raise ValueError("A record is missing required information.")
 
-        # Check that the date is valid.
         date.fromisoformat(record_date)
 
         record_id = record.get("id") or str(uuid.uuid4())
-
-        # Check that the ID is a valid UUID.
         uuid.UUID(str(record_id))
 
         rows_to_restore.append({
@@ -182,10 +184,8 @@ def restore_backup(restored_data):
             "reviewed_at": record.get("reviewed_at"),
         })
 
-    # Replace existing records only after the backup passes validation.
     delete_all_records()
 
-    # Insert in batches to avoid sending a very large request.
     batch_size = 500
 
     for start in range(0, len(rows_to_restore), batch_size):
@@ -195,9 +195,327 @@ def restore_backup(restored_data):
             supabase.table("daily_records").insert(batch).execute()
 
 
-# Load the records from Supabase.
+# ---------- Supabase Storage: monthly reports ----------
+
+def upload_monthly_report(path, pdf_bytes):
+    """Upload a new PDF to the private monthly-reports bucket."""
+
+    return (
+        supabase.storage
+        .from_("monthly-reports")
+        .upload(
+            path=path,
+            file=pdf_bytes,
+            file_options={
+                "content-type": "application/pdf",
+                "upsert": "false",
+            },
+        )
+    )
+
+
+def list_monthly_reports(folder):
+    """List saved PDF reports inside a month folder."""
+
+    return (
+        supabase.storage
+        .from_("monthly-reports")
+        .list(
+            folder,
+            {
+                "limit": 1000,
+                "offset": 0,
+                "sortBy": {
+                    "column": "name",
+                    "order": "desc",
+                },
+            },
+        )
+    ) or []
+
+
+def download_monthly_report(path):
+    """Download a PDF from the private bucket."""
+
+    return (
+        supabase.storage
+        .from_("monthly-reports")
+        .download(path)
+    )
+
+
+# ---------- Tamil font for PDF reports ----------
+
+def get_tamil_font_path():
+    """
+    Download Noto Sans Tamil and create a static font file
+    for reliable Tamil text rendering in the PDF.
+    """
+
+    font_path = os.path.join(
+        tempfile.gettempdir(),
+        "daytrace_noto_sans_tamil.ttf",
+    )
+
+    if os.path.exists(font_path) and os.path.getsize(font_path) > 50000:
+        return font_path
+
+    font_url = (
+        "https://raw.githubusercontent.com/google/fonts/main/"
+        "ofl/notosanstamil/NotoSansTamil%5Bwdth%2Cwght%5D.ttf"
+    )
+
+    request = urllib.request.Request(
+        font_url,
+        headers={"User-Agent": "DayTrace"},
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        font_bytes = response.read()
+
+    if len(font_bytes) < 50000:
+        raise RuntimeError("The Tamil font could not be downloaded correctly.")
+
+    from fontTools.ttLib import TTFont
+    from fontTools.varLib.instancer import instantiateVariableFont
+
+    font = TTFont(io.BytesIO(font_bytes))
+
+    if "fvar" in font:
+        axis_values = {}
+
+        for axis in font["fvar"].axes:
+            if axis.axisTag == "wght":
+                axis_values["wght"] = min(
+                    max(400, axis.minValue),
+                    axis.maxValue,
+                )
+
+            elif axis.axisTag == "wdth":
+                axis_values["wdth"] = min(
+                    max(100, axis.minValue),
+                    axis.maxValue,
+                )
+
+        if axis_values:
+            font = instantiateVariableFont(
+                font,
+                axis_values,
+                inplace=True,
+            )
+
+    font.save(font_path)
+
+    return font_path
+
+
+# ---------- PDF generation ----------
+
+class MonthlyReportPDF(FPDF):
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("DayTraceTamil", size=8)
+        self.set_text_color(100, 116, 139)
+
+        self.cell(
+            0,
+            8,
+            text=f"Page {self.page_no()}",
+            align="R",
+        )
+
+
+def create_monthly_pdf(records, month_number, year):
+    """Create a teacher-wise monthly PDF report."""
+
+    font_path = get_tamil_font_path()
+
+    pdf = MonthlyReportPDF(
+        orientation="P",
+        unit="mm",
+        format="A4",
+    )
+
+    pdf.set_margins(15, 18, 15)
+    pdf.set_auto_page_break(auto=True, margin=18)
+
+    pdf.add_font(
+        family="DayTraceTamil",
+        fname=font_path,
+    )
+
+    # HarfBuzz shaping is required for correct Indic-script rendering.
+    pdf.set_text_shaping(use_shaping_engine=True)
+
+    pdf.add_page()
+
+    month_name = calendar.month_name[month_number]
+
+    total = len(records)
+    reviewed = sum(1 for r in records if r.get("reviewed"))
+    pending = total - reviewed
+
+    teacher_groups = {}
+
+    for record in records:
+        teacher = clean_name(
+            record.get("teacher", "Unknown teacher")
+        ) or "Unknown teacher"
+
+        teacher_groups.setdefault(teacher, []).append(record)
+
+    pdf.set_text_color(79, 70, 229)
+    pdf.set_font("DayTraceTamil", size=19)
+    pdf.multi_cell(0, 10, text="DayTrace")
+
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_font("DayTraceTamil", size=14)
+    pdf.multi_cell(
+        0,
+        8,
+        text="Monthly Teacher Activity Report",
+    )
+
+    pdf.set_text_color(71, 85, 105)
+    pdf.set_font("DayTraceTamil", size=10)
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=f"Reporting month: {month_name} {year}",
+    )
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=(
+            "Generated on: "
+            + datetime.now().strftime("%d %b %Y, %I:%M %p")
+        ),
+    )
+
+    pdf.ln(3)
+
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_font("DayTraceTamil", size=11)
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=f"Teachers: {len(teacher_groups)}",
+    )
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=f"Total activities: {total}",
+    )
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=f"Reviewed: {reviewed}",
+    )
+
+    pdf.multi_cell(
+        0,
+        7,
+        text=f"Pending review: {pending}",
+    )
+
+    pdf.ln(4)
+
+    if not records:
+        pdf.set_font("DayTraceTamil", size=11)
+        pdf.multi_cell(
+            0,
+            7,
+            text="No activities were recorded during this month.",
+        )
+
+    for teacher in sorted(teacher_groups, key=str.casefold):
+
+        items = teacher_groups[teacher]
+
+        teacher_reviewed = sum(
+            1 for r in items if r.get("reviewed")
+        )
+
+        teacher_pending = len(items) - teacher_reviewed
+
+        pdf.set_text_color(79, 70, 229)
+        pdf.set_font("DayTraceTamil", size=13)
+
+        pdf.multi_cell(
+            0,
+            8,
+            text=teacher,
+        )
+
+        pdf.set_text_color(71, 85, 105)
+        pdf.set_font("DayTraceTamil", size=9)
+
+        pdf.multi_cell(
+            0,
+            6,
+            text=(
+                f"Activities: {len(items)} | "
+                f"Reviewed: {teacher_reviewed} | "
+                f"Pending: {teacher_pending}"
+            ),
+        )
+
+        items = sorted(
+            items,
+            key=lambda r: (
+                r.get("date", ""),
+                r.get("time", ""),
+            ),
+        )
+
+        for record in items:
+
+            try:
+                record_date = date.fromisoformat(
+                    record.get("date", "")
+                ).strftime("%d %b %Y")
+            except ValueError:
+                record_date = record.get("date", "")
+
+            time_slot = record.get("time") or "Time not specified"
+            activity = record.get("activity", "")
+            status = (
+                "Reviewed"
+                if record.get("reviewed")
+                else "Pending review"
+            )
+
+            pdf.set_text_color(30, 41, 59)
+            pdf.set_font("DayTraceTamil", size=9)
+
+            pdf.multi_cell(
+                0,
+                6,
+                text=(
+                    f"{record_date} | {time_slot}\n"
+                    f"Activity: {activity}\n"
+                    f"Status: {status}"
+                ),
+            )
+
+            pdf.ln(2)
+
+        pdf.ln(3)
+
+    return bytes(pdf.output())
+
+
+# ---------- Load records ----------
+
 try:
     data = load_data()
+
 except Exception as e:
     st.error(f"Could not load activity records: {e}")
     st.stop()
@@ -271,11 +589,13 @@ is_head = False
 teacher_name = ""
 
 if role == "Teacher":
+
     teacher_name = clean_name(
         st.sidebar.text_input("👤 Your name")
     )
 
 else:
+
     expected = section_head_passcode()
 
     if expected is None:
@@ -292,6 +612,7 @@ else:
 
     if entered == expected:
         is_head = True
+
     elif entered:
         st.sidebar.error("Wrong passcode.")
 
@@ -342,6 +663,7 @@ if role == "Teacher":
     # ---------- Record Activity tab ----------
 
     with tab1:
+
         st.subheader("Record a school activity")
 
         mode = st.radio(
@@ -358,6 +680,7 @@ if role == "Teacher":
         subject = None
 
         if activity == "Teaching":
+
             subject = st.selectbox(
                 "Teaching subject",
                 TEACHING_SUBJECTS,
@@ -382,6 +705,7 @@ if role == "Teacher":
         )
 
         if audio and audio.get("bytes"):
+
             audio_bytes = audio["bytes"]
 
             audio_hash = hashlib.sha256(
@@ -398,8 +722,10 @@ if role == "Teacher":
             )
 
             if st.session_state.get("last_transcription_id") != transcription_id:
+
                 try:
                     with st.spinner("Transcribing your voice note..."):
+
                         transcript = transcribe_audio(
                             audio_bytes,
                             language_code,
@@ -414,6 +740,7 @@ if role == "Teacher":
                         st.session_state["activity_description"] = (
                             previous_text + " " + transcript
                         )
+
                     else:
                         st.session_state["activity_description"] = transcript
 
@@ -421,7 +748,9 @@ if role == "Teacher":
                         transcription_id
                     )
 
-                    st.success("Voice transcription added to the description.")
+                    st.success(
+                        "Voice transcription added to the description."
+                    )
 
                 except sr.UnknownValueError:
                     st.warning(
@@ -452,12 +781,14 @@ if role == "Teacher":
             end = None
 
             if mode == "Choose a slot":
+
                 slot = st.selectbox(
                     "Time slot",
                     TIME_SLOTS,
                 )
 
             elif mode == "Enter my own time":
+
                 col1, col2 = st.columns(2)
 
                 start = col1.time_input(
@@ -473,6 +804,7 @@ if role == "Teacher":
                 )
 
             else:
+
                 st.info(
                     "This activity will be saved for the whole day."
                 )
@@ -483,9 +815,11 @@ if role == "Teacher":
             )
 
         if submitted:
+
             error = None
 
             if mode == "Enter my own time":
+
                 if end <= start:
                     error = "The end time must be after the start time."
 
@@ -494,33 +828,40 @@ if role == "Teacher":
                 )
 
             elif mode == WHOLE_DAY:
+
                 time_label = WHOLE_DAY
 
             else:
+
                 time_label = slot
 
             if subject:
                 activity_name = f"Teaching – {subject}"
+
             else:
                 activity_name = activity
 
             description_text = description.strip()
 
             if activity == "Other School Duty":
+
                 if not description_text:
                     error = "Please describe the other school duty."
+
                 else:
                     activity_name = (
                         f"Other School Duty: {description_text}"
                     )
 
             elif description_text:
+
                 activity_name += f": {description_text}"
 
             if error:
                 st.warning(error)
 
             else:
+
                 try:
                     save_record({
                         "date": selected_date,
@@ -542,15 +883,19 @@ if role == "Teacher":
     # ---------- My Timeline tab ----------
 
     with tab2:
+
         st.subheader(f"My Timeline — {selected_date}")
 
         if not mine:
+
             st.info(
                 "No activities recorded for this date yet."
             )
 
         else:
+
             for record in mine:
+
                 with st.container(border=True):
 
                     status = (
@@ -570,6 +915,7 @@ if role == "Teacher":
             if st.button(
                 "Clear my unreviewed activities for this date"
             ):
+
                 try:
                     for record in mine:
                         if not record.get("reviewed"):
@@ -620,17 +966,20 @@ else:
         done / total if total else 0.0
     )
 
-    tab1, tab2 = st.tabs([
+    tab1, tab2, tab3 = st.tabs([
         "✅ Review Workday",
         "💾 Backup",
+        "📄 Monthly Reports",
     ])
 
     # ---------- Review Workday tab ----------
 
     with tab1:
+
         st.subheader(f"Review — {selected_date}")
 
         if not day_records:
+
             st.info(
                 "No teacher has recorded activities for this date yet."
             )
@@ -656,6 +1005,7 @@ else:
                     left, right = st.columns([5, 2])
 
                     with left:
+
                         st.markdown(
                             f"**🕒 {r.get('time', '')}**"
                         )
@@ -667,12 +1017,14 @@ else:
                     with right:
 
                         if r.get("reviewed"):
+
                             st.caption("✅ Reviewed")
 
                             if st.button(
                                 "Undo",
                                 key=f"undo_{r['id']}",
                             ):
+
                                 try:
                                     r["reviewed"] = False
                                     r["reviewed_at"] = None
@@ -686,11 +1038,13 @@ else:
                                     )
 
                         else:
+
                             if st.button(
                                 "Mark as reviewed",
                                 key=f"rev_{r['id']}",
                                 type="primary",
                             ):
+
                                 try:
                                     r["reviewed"] = True
 
@@ -710,23 +1064,25 @@ else:
 
                     st.divider()
 
-                # Mark all activities for this teacher as reviewed.
-
                 if n_done < len(items):
 
                     if st.button(
                         f"Mark all of {teacher}'s activities as reviewed",
                         key=f"all_{selected_date}_{teacher}",
                     ):
+
                         try:
                             now = datetime.now().isoformat(
                                 timespec="seconds"
                             )
 
                             for r in items:
+
                                 if not r.get("reviewed"):
+
                                     r["reviewed"] = True
                                     r["reviewed_at"] = now
+
                                     update_record(r)
 
                             st.rerun()
@@ -739,6 +1095,7 @@ else:
     # ---------- Backup tab ----------
 
     with tab2:
+
         st.subheader("Backup all teachers' data")
 
         backup = json.dumps(
@@ -766,6 +1123,7 @@ else:
         if uploaded is not None:
 
             if st.button("Restore backup"):
+
                 try:
                     restored = json.load(uploaded)
 
@@ -783,18 +1141,18 @@ else:
                     AttributeError,
                     json.JSONDecodeError,
                 ) as e:
+
                     st.error(
                         f"Please choose a valid DayTrace backup. Details: {e}"
                     )
 
                 except Exception as e:
+
                     st.error(
                         f"Could not restore the backup: {e}"
                     )
 
         st.divider()
-
-        # ---------- Delete all data ----------
 
         st.subheader("🗑️ Delete all data")
 
@@ -811,6 +1169,7 @@ else:
             "Delete all data",
             disabled=not confirm,
         ):
+
             try:
                 delete_all_records()
 
@@ -820,8 +1179,253 @@ else:
             except Exception as e:
                 st.error(f"Could not delete data: {e}")
 
+    # ---------- Monthly Reports tab ----------
+
+    with tab3:
+
+        st.subheader("Monthly Teacher Activity Reports")
+
+        st.write(
+            "Generate a combined monthly PDF for all teachers. "
+            "Reports are saved in your private Supabase Storage bucket."
+        )
+
+        available_years = {
+            date.today().year
+        }
+
+        for record in data["daily_records"]:
+
+            try:
+                available_years.add(
+                    date.fromisoformat(record["date"]).year
+                )
+
+            except (ValueError, TypeError, KeyError):
+                pass
+
+        year_options = sorted(
+            available_years,
+            reverse=True,
+        )
+
+        year = st.selectbox(
+            "Select year",
+            year_options,
+            key="monthly_report_year",
+        )
+
+        month_options = [
+            calendar.month_name[m]
+            for m in range(1, 13)
+        ]
+
+        month_name = st.selectbox(
+            "Select month",
+            month_options,
+            index=date.today().month - 1,
+            key="monthly_report_month",
+        )
+
+        month_number = month_options.index(month_name) + 1
+
+        month_folder = f"{year}-{month_number:02d}"
+
+        month_records = []
+
+        for record in data["daily_records"]:
+
+            try:
+                record_date = date.fromisoformat(
+                    record.get("date", "")
+                )
+
+                if (
+                    record_date.year == year
+                    and record_date.month == month_number
+                ):
+                    month_records.append(record)
+
+            except (ValueError, TypeError):
+                continue
+
+        month_reviewed = sum(
+            1 for r in month_records if r.get("reviewed")
+        )
+
+        month_pending = len(month_records) - month_reviewed
+
+        m1, m2, m3 = st.columns(3)
+
+        m1.metric(
+            "Teachers",
+            len({
+                clean_name(r.get("teacher", ""))
+                for r in month_records
+            }),
+        )
+
+        m2.metric(
+            "Activities",
+            len(month_records),
+        )
+
+        m3.metric(
+            "Pending review",
+            month_pending,
+        )
+
+        st.divider()
+
+        if not month_records:
+
+            st.info(
+                "No activities have been recorded for this month. "
+                "You can still download reports saved earlier."
+            )
+
+        if st.button(
+            "📄 Generate and save monthly PDF",
+            type="primary",
+            disabled=not month_records,
+            key=f"generate_monthly_{month_folder}",
+        ):
+
+            try:
+
+                with st.spinner(
+                    "Preparing your monthly report..."
+                ):
+
+                    pdf_bytes = create_monthly_pdf(
+                        month_records,
+                        month_number,
+                        year,
+                    )
+
+                    timestamp = datetime.now().strftime(
+                        "%Y%m%d_%H%M%S"
+                    )
+
+                    filename = (
+                        f"DayTrace_{month_folder}_{timestamp}.pdf"
+                    )
+
+                    storage_path = (
+                        f"{month_folder}/{filename}"
+                    )
+
+                    upload_monthly_report(
+                        storage_path,
+                        pdf_bytes,
+                    )
+
+                    st.session_state["latest_monthly_report"] = {
+                        "folder": month_folder,
+                        "path": storage_path,
+                        "filename": filename,
+                        "bytes": pdf_bytes,
+                    }
+
+                st.success(
+                    "Monthly report generated and saved successfully!"
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Could not generate or save the monthly report: {e}"
+                )
+
+        latest_report = st.session_state.get(
+            "latest_monthly_report"
+        )
+
+        if (
+            latest_report
+            and latest_report.get("folder") == month_folder
+        ):
+
+            st.download_button(
+                "⬇️ Download the newly generated PDF",
+                data=latest_report["bytes"],
+                file_name=latest_report["filename"],
+                mime="application/pdf",
+                key=f"latest_pdf_{month_folder}",
+            )
+
+        st.divider()
+
+        st.subheader("Previously saved monthly reports")
+
+        try:
+
+            saved_objects = list_monthly_reports(
+                month_folder
+            )
+
+            saved_names = sorted(
+                [
+                    item["name"]
+                    for item in saved_objects
+                    if item.get("name", "").lower().endswith(".pdf")
+                ],
+                reverse=True,
+            )
+
+            if not saved_names:
+
+                st.info(
+                    "No saved PDF reports were found for this month."
+                )
+
+            else:
+
+                selected_report = st.selectbox(
+                    "Choose a saved report",
+                    saved_names,
+                    key=f"saved_report_{month_folder}",
+                )
+
+                if selected_report:
+
+                    selected_path = (
+                        f"{month_folder}/{selected_report}"
+                    )
+
+                    try:
+
+                        with st.spinner("Loading saved report..."):
+
+                            saved_pdf = download_monthly_report(
+                                selected_path
+                            )
+
+                        st.download_button(
+                            "⬇️ Download selected saved report",
+                            data=saved_pdf,
+                            file_name=selected_report,
+                            mime="application/pdf",
+                            key=f"download_saved_{month_folder}_{selected_report}",
+                        )
+
+                    except Exception as e:
+
+                        st.error(
+                            f"Could not download the saved report: {e}"
+                        )
+
+        except Exception as e:
+
+            st.error(
+                f"Could not retrieve saved monthly reports: {e}"
+            )
+
 
 # ---------- Footer ----------
 
 st.divider()
 st.caption("DayTrace | Teacher Workday Tracker")
+
+
+
