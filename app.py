@@ -208,8 +208,27 @@ audio = mic_recorder(
 
 if audio:
     st.success("Voice recorded successfully!")
-            submitted = st.form_submit_button("Save Activity", type="primary")
+            with st.form("activity_form", clear_on_submit=True):
 
+    slot = start = end = None
+
+    if mode == "Choose a slot":
+        slot = st.selectbox("Time slot", TIME_SLOTS)
+
+    elif mode == "Enter my own time":
+        col1, col2 = st.columns(2)
+        start = col1.time_input("From", value=time(8, 20), step=300)
+        end = col2.time_input("To", value=time(8, 50), step=300)
+
+    else:
+        st.info("This will be saved for the whole day.")
+
+    description = st.text_input("Description (optional)")
+
+    submitted = st.form_submit_button(
+        "Save Activity",
+        type="primary"
+    )
         if submitted:
             error = None
             if mode == "Enter my own time":
