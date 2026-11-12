@@ -2,3 +2,5 @@ streamlit
 streamlit-mic-recorder
 SpeechRecognition
 pydub
+supabase==2.34.1
+reportlab==5.1.0
