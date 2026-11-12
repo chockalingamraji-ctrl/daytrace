@@ -313,11 +313,13 @@ if role == "Teacher":
                     )
                     st.write(record.get("activity", ""))
 
-          if st.button("Clear my unreviewed activities for this date"):
-    for r in mine:
-        if not r.get("reviewed"):
-            delete_record(r["id"])
-    st.rerun()
+          
+            if st.button("Clear my unreviewed activities for this date"):
+                for r in mine:
+                    if not r.get("reviewed"):
+                        delete_record(r["id"])
+                st.rerun()
+
 # ---------- Section head view ----------
 
 else:
