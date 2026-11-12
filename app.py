@@ -279,7 +279,9 @@ if role == "Teacher":
 
             if error:
                 st.warning(error)
-                       if error:
+              
+
+            if error:
                 st.warning(error)
             else:
                 save_record({
@@ -291,6 +293,8 @@ if role == "Teacher":
                 })
                 st.success("Activity saved!")
                 st.rerun()
+
+
     with tab2:
         st.subheader(f"My Timeline — {selected_date}")
 
