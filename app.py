@@ -357,14 +357,15 @@ else:
                     with left:
                         st.markdown(f"**🕒 {r.get('time', '')}**")
                         st.write(r.get("activity", ""))
+                   
                     with right:
                         if r.get("reviewed"):
                             st.caption("✅ Reviewed")
-if st.button("Undo", key=f"undo_{r['id']}"):
-    r["reviewed"] = False
-    r.pop("reviewed_at", None)
-    update_record(r)
-    st.rerun()
+                            if st.button("Undo", key=f"undo_{r['id']}"):
+                                r["reviewed"] = False
+                                r.pop("reviewed_at", None)
+                                update_record(r)
+                                st.rerun()
                         else:
                             if st.button(
                                 "Mark as reviewed",
@@ -375,6 +376,7 @@ if st.button("Undo", key=f"undo_{r['id']}"):
                                 r["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
                                 update_record(r)
                                 st.rerun()
+
                     st.divider()
 
                 if n_done < len(items):
