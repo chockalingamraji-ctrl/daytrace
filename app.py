@@ -154,6 +154,7 @@ day_records = [
     r for r in data["daily_records"] if r.get("date") == selected_date
 ]
 
+
 # ---------- Teacher view ----------
 
 if role == "Teacher":
@@ -161,7 +162,10 @@ if role == "Teacher":
         st.info("Enter your name in the sidebar to start recording.")
         st.stop()
 
-    mine = [r for r in day_records if same_person(r.get("teacher", ""), teacher_name)]
+    mine = [
+        r for r in day_records
+        if same_person(r.get("teacher", ""), teacher_name)
+    ]
     mine_reviewed = sum(1 for r in mine if r.get("reviewed"))
 
     a, b, c = st.columns(3)
@@ -180,76 +184,74 @@ if role == "Teacher":
             horizontal=True,
         )
 
-        # Kept outside the form so the sub-options appear right away
         activity = st.selectbox("Activity", ACTIVITIES)
         subject = None
+
         if activity == "Teaching":
             subject = st.selectbox("Teaching subject", TEACHING_SUBJECTS)
 
+        description = st.text_input("Description (optional)")
+
+        st.write("🎤 Voice input")
+        audio = mic_recorder(
+            start_prompt="Start Recording",
+            stop_prompt="Stop Recording",
+            key="voice_note"
+        )
+
+        if audio:
+            st.success("Voice recorded successfully! We will add transcription next.")
+
         with st.form("activity_form", clear_on_submit=True):
             slot = start = end = None
+
             if mode == "Choose a slot":
                 slot = st.selectbox("Time slot", TIME_SLOTS)
+
             elif mode == "Enter my own time":
                 col1, col2 = st.columns(2)
-                start = col1.time_input("From", value=time(8, 20), step=300)
-                end = col2.time_input("To", value=time(8, 50), step=300)
+                start = col1.time_input(
+                    "From", value=time(8, 20), step=300
+                )
+                end = col2.time_input(
+                    "To", value=time(8, 50), step=300
+                )
+
             else:
                 st.info("This will be saved for the whole day.")
-description = st.text_input("Description (optional)")
 
-st.write("🎤 Voice input")
+            submitted = st.form_submit_button(
+                "Save Activity", type="primary"
+            )
 
-audio = mic_recorder(
-    start_prompt="Start Recording",
-    stop_prompt="Stop Recording",
-    key="voice_note"
-)
-
-if audio:
-    st.success("Voice recorded successfully!")
-            with st.form("activity_form", clear_on_submit=True):
-
-    slot = start = end = None
-
-    if mode == "Choose a slot":
-        slot = st.selectbox("Time slot", TIME_SLOTS)
-
-    elif mode == "Enter my own time":
-        col1, col2 = st.columns(2)
-        start = col1.time_input("From", value=time(8, 20), step=300)
-        end = col2.time_input("To", value=time(8, 50), step=300)
-
-    else:
-        st.info("This will be saved for the whole day.")
-
-    description = st.text_input("Description (optional)")
-
-    submitted = st.form_submit_button(
-        "Save Activity",
-        type="primary"
-    )
         if submitted:
             error = None
+
             if mode == "Enter my own time":
                 if end <= start:
                     error = "The end time must be after the start time."
                 time_label = f"{fmt_time(start)}–{fmt_time(end)}"
+
             elif mode == WHOLE_DAY:
                 time_label = WHOLE_DAY
+
             else:
                 time_label = slot
 
             if subject:
-                activity = f"Teaching – {subject}"
+                activity_name = f"Teaching – {subject}"
+            else:
+                activity_name = activity
 
-            if activity == "Other School Duty":
+            if activity_name == "Other School Duty":
                 if not description.strip():
                     error = "Please describe the other school duty."
                 else:
-                    activity = f"Other School Duty: {description.strip()}"
+                    activity_name = (
+                        f"Other School Duty: {description.strip()}"
+                    )
             elif description.strip():
-                activity = f"{activity}: {description.strip()}"
+                activity_name += f": {description.strip()}"
 
             if error:
                 st.warning(error)
@@ -259,7 +261,7 @@ if audio:
                     "date": selected_date,
                     "teacher": teacher_name,
                     "time": time_label,
-                    "activity": activity,
+                    "activity": activity_name,
                     "reviewed": False,
                 })
                 save_data(data)
@@ -268,13 +270,20 @@ if audio:
 
     with tab2:
         st.subheader(f"My Timeline — {selected_date}")
+
         if not mine:
             st.info("No activities recorded for this date yet.")
         else:
             for record in mine:
                 with st.container(border=True):
-                    status = "✅ Reviewed" if record.get("reviewed") else "⏳ Not reviewed"
-                    st.markdown(f"**🕒 {record.get('time', '')}**  ·  {status}")
+                    status = (
+                        "✅ Reviewed"
+                        if record.get("reviewed")
+                        else "⏳ Not reviewed"
+                    )
+                    st.markdown(
+                        f"**🕒 {record.get('time', '')}** · {status}"
+                    )
                     st.write(record.get("activity", ""))
 
             if st.button("Clear my unreviewed activities for this date"):
@@ -282,7 +291,9 @@ if audio:
                     r for r in data["daily_records"]
                     if not (
                         r.get("date") == selected_date
-                        and same_person(r.get("teacher", ""), teacher_name)
+                        and same_person(
+                            r.get("teacher", ""), teacher_name
+                        )
                         and not r.get("reviewed")
                     )
                 ]
