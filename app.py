@@ -134,13 +134,12 @@ teacher_name = ""
 if role == "Teacher":
     teacher_name = clean_name(st.sidebar.text_input("👤 Your name"))
 else:
-    expected = section_head_passcode()
-    if expected is None:
-        expected = "sectionhead"
-        st.sidebar.warning(
-            "No SECTION_HEAD_PASSCODE secret set. Using the default "
-            "passcode 'sectionhead'. Please set your own."
-        )
+expected = section_head_passcode()
+if expected is None:
+    st.sidebar.error(
+        "SECTION_HEAD_PASSCODE is missing. Please configure it in Secrets."
+    )
+    st.stop()
     entered = st.sidebar.text_input("🔑 Section head passcode", type="password")
     if entered == expected:
         is_head = True
