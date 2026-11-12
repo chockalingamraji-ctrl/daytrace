@@ -50,49 +50,64 @@ TEACHING_SUBJECTS = [
 ]
 
 
-# ---------- storage (one shared file for every teacher) ----------
-
-def normalise(saved):
-    """Make sure every record has an id, a teacher and a reviewed flag."""
-    records, changed = [], False
-    for r in saved.get("daily_records", []):
-        if not isinstance(r, dict):
-            continue
-        for key, default in (
-            ("id", None), ("teacher", "Unknown teacher"), ("reviewed", False)
-        ):
-            if key not in r:
-                r[key] = uuid.uuid4().hex if key == "id" else default
-                changed = True
-        records.append(r)
-    data = {
-        "daily_records": records,
-        "reviewed_slots": saved.get("reviewed_slots", {}),
-    }
-    return data, changed
 
 
-def save_data(data):
-    DATA_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
+# ---------- Supabase storage ----------
 
 def load_data():
-    saved = {}
-    if DATA_FILE.exists():
-        try:
-            saved = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            saved = {}
-    data, changed = normalise(saved)
-    if changed:
-        save_data(data)  # keep generated ids stable
-    return data
+    response = (
+        supabase.table("daily_records")
+        .select("*")
+        .order("activity_date")
+        .execute()
+    )
+
+    records = []
+
+    for r in response.data:
+        records.append({
+            "id": r["id"],
+            "date": r["activity_date"],
+            "teacher": r["teacher"],
+            "time": r.get("time_slot") or "",
+            "activity": r["activity"],
+            "reviewed": r.get("reviewed", False),
+            "reviewed_at": r.get("reviewed_at"),
+        })
+
+    return {
+        "daily_records": records,
+        "reviewed_slots": {},
+    }
 
 
-# Loaded fresh on every run so all teachers and the section head
-# always see the same, latest data.
+def save_record(record):
+    supabase.table("daily_records").insert({
+        "teacher": record["teacher"],
+        "activity": record["activity"],
+        "activity_date": record["date"],
+        "time_slot": record["time"],
+        "reviewed": record.get("reviewed", False),
+        "reviewed_at": record.get("reviewed_at"),
+    }).execute()
+
+
+def update_record(record):
+    supabase.table("daily_records").update({
+        "reviewed": record.get("reviewed", False),
+        "reviewed_at": record.get("reviewed_at"),
+    }).eq("id", record["id"]).execute()
+
+
+def delete_record(record_id):
+    supabase.table("daily_records").delete().eq("id", record_id).execute()
+
+
+def delete_all_records():
+    supabase.table("daily_records").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+
+
+# Load records from Supabase
 data = load_data()
 
 
@@ -265,15 +280,13 @@ if role == "Teacher":
             if error:
                 st.warning(error)
             else:
-                data["daily_records"].append({
-                    "id": uuid.uuid4().hex,
-                    "date": selected_date,
-                    "teacher": teacher_name,
-                    "time": time_label,
-                    "activity": activity_name,
-                    "reviewed": False,
-                })
-                save_data(data)
+save_record({
+    "date": selected_date,
+    "teacher": teacher_name,
+    "time": time_label,
+    "activity": activity_name,
+    "reviewed": False,
+})
                 st.success("Activity saved!")
                 st.rerun()
 
@@ -295,20 +308,11 @@ if role == "Teacher":
                     )
                     st.write(record.get("activity", ""))
 
-            if st.button("Clear my unreviewed activities for this date"):
-                data["daily_records"] = [
-                    r for r in data["daily_records"]
-                    if not (
-                        r.get("date") == selected_date
-                        and same_person(
-                            r.get("teacher", ""), teacher_name
-                        )
-                        and not r.get("reviewed")
-                    )
-                ]
-                save_data(data)
-                st.rerun()
-
+          if st.button("Clear my unreviewed activities for this date"):
+    for r in mine:
+        if not r.get("reviewed"):
+            delete_record(r["id"])
+    st.rerun()
 # ---------- Section head view ----------
 
 else:
@@ -349,11 +353,11 @@ else:
                     with right:
                         if r.get("reviewed"):
                             st.caption("✅ Reviewed")
-                            if st.button("Undo", key=f"undo_{r['id']}"):
-                                r["reviewed"] = False
-                                r.pop("reviewed_at", None)
-                                save_data(data)
-                                st.rerun()
+if st.button("Undo", key=f"undo_{r['id']}"):
+    r["reviewed"] = False
+    r.pop("reviewed_at", None)
+    update_record(r)
+    st.rerun()
                         else:
                             if st.button(
                                 "Mark as reviewed",
@@ -362,22 +366,22 @@ else:
                             ):
                                 r["reviewed"] = True
                                 r["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
-                                save_data(data)
+                                update_record(r)
                                 st.rerun()
                     st.divider()
 
                 if n_done < len(items):
                     if st.button(
-                        f"Mark all of {teacher}'s activities as reviewed",
-                        key=f"all_{selected_date}_{teacher}",
-                    ):
-                        now = datetime.now().isoformat(timespec="seconds")
-                        for r in items:
-                            if not r.get("reviewed"):
-                                r["reviewed"] = True
-                                r["reviewed_at"] = now
-                        save_data(data)
-                        st.rerun()
+    f"Mark all of {teacher}'s activities as reviewed",
+    key=f"all_{selected_date}_{teacher}",
+):
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in items:
+        if not r.get("reviewed"):
+            r["reviewed"] = True
+            r["reviewed_at"] = now
+            update_record(r)
+    st.rerun()
 
     with tab2:
         st.subheader("Backup all teachers' data")
@@ -397,10 +401,15 @@ else:
                     raise ValueError("Invalid activity list")
                 if not isinstance(restored.get("reviewed_slots", {}), dict):
                     raise ValueError("Invalid review data")
-                new_data, _ = normalise(restored)
-                save_data(new_data)
-                st.success("Backup restored!")
-                st.rerun()
+               new_data, _ = normalise(restored)
+
+delete_all_records()
+
+for record in new_data["daily_records"]:
+    save_record(record)
+
+st.success("Backup restored to Supabase!")
+st.rerun()
             except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                 st.error("Please choose a valid DayTrace backup.")
 
@@ -409,7 +418,7 @@ else:
         st.caption("Removes every teacher's entries. Download a backup first if you want to keep a copy.")
         confirm = st.checkbox("Yes, I want to delete everything")
         if st.button("Delete all data", disabled=not confirm):
-            save_data({"daily_records": [], "reviewed_slots": {}})
+           delete_all_records()
             st.success("All data deleted.")
             st.rerun()
 
